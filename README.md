@@ -1,19 +1,16 @@
 # Basalt Geochemistry Interpreter
 
-This app allows geochemical interpretation of basaltic rocks:
-- REE patterns, εNd vs εHf isotopes
-- Crustal thickness, contamination, melting depth proxies
-- PCA, t-SNE, clustering
-- MLP classification of tectonic settings
+Streamlit app to visualize and analyze basaltic and basaltic andesite geochemistry:
+- Major, trace, REE and isotopic interpretations
+- ML classification of tectonic setting
+- Dimensionality reduction and clustering
+- Spider plots, isotope diagrams, and more
 
-## Run Locally
+## Run locally:
 ```bash
 pip install -r requirements.txt
 streamlit run basalt_geochem_pipeline.py
 ```
 
-## Deploy on Streamlit Cloud
-1. Upload to GitHub
-2. Go to https://share.streamlit.io
-3. Select `basalt_geochem_pipeline.py`
-4. Deploy
+## Deploy:
+Upload to GitHub and deploy via Streamlit Cloud.
