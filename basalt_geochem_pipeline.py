@@ -1,4 +1,4 @@
-## basalt_geochem_pipeline.py
+# basalt_geochem_pipeline.py
 
 import pandas as pd
 import numpy as np
@@ -49,15 +49,13 @@ def filter_basalt_to_basaltic_andesite(df):
     return df[(df['SiO2'] >= 45) & (df['SiO2'] <= 57)]
 
 def compute_ratios(df):
-    """Compute all custom geochemical ratios and ε-values, only if inputs exist."""
+    """Compute all custom geochemical ratios and ε-values, guarded by column existence."""
     eps = 1e-6
 
-    # Helper to add ratio only if both cols exist
     def add_ratio(out, num, den):
         if num in df.columns and den in df.columns:
             df[out] = df[num] / (df[den] + eps)
 
-    # Major/trace ratios
     add_ratio('Th/La', 'Th', 'La')
     if all(c in df.columns for c in ['Ce','La','Pr']):
         df['Ce/Ce*'] = df['Ce'] / (np.sqrt(df['La'] * df['Pr']) + eps)
@@ -78,18 +76,16 @@ def compute_ratios(df):
     add_ratio('Ti/V', 'Ti', 'V')
     add_ratio('Ti/Al', 'Ti', 'Al')
 
-    # Isotope epsilon values
     if '143Nd/144Nd' in df.columns:
-        CHUR_Nd = 0.512638
-        df['εNd'] = ((df['143Nd/144Nd'] - CHUR_Nd) / CHUR_Nd) * 1e4
+        CHUR = 0.512638
+        df['εNd'] = ((df['143Nd/144Nd'] - CHUR) / CHUR) * 1e4
     if '176Hf/177Hf' in df.columns:
-        CHUR_Hf = 0.282785
-        df['εHf'] = ((df['176Hf/177Hf'] - CHUR_Hf) / CHUR_Hf) * 1e4
+        CHUR = 0.282785
+        df['εHf'] = ((df['176Hf/177Hf'] - CHUR) / CHUR) * 1e4
 
     return df
 
 def preprocess_list(df_list):
-    """Concat, filter, and compute ratios in one go."""
     full = pd.concat(df_list, ignore_index=True)
     full = filter_basalt_to_basaltic_andesite(full)
     full = compute_ratios(full)
@@ -99,8 +95,8 @@ def preprocess_list(df_list):
 # Streamlit App Layout
 # -----------------------------
 st.title("Basalt & Basaltic-Andesite Geochemistry Interpreter")
-
 st.markdown("**Load** GEOROC parts from GitHub **or** **Upload** your own CSVs.")
+
 use_github     = st.checkbox("📦 Load GEOROC parts from GitHub")
 uploaded_parts = st.file_uploader("Upload split GEOROC CSVs", type="csv", accept_multiple_files=True)
 
@@ -112,8 +108,8 @@ if use_github:
     filenames = [f"2024-12-2JETOA_part{i}.csv" for i in range(1, 11)]
     for fn in filenames:
         try:
-            resp = requests.get(base_url + fn)
-            part = load_data(StringIO(resp.text))
+            r = requests.get(base_url + fn)
+            part = load_data(StringIO(r.text))
             if part.isnull().any().any():
                 skipped.append(fn)
                 continue
@@ -171,7 +167,10 @@ if all(e in df.columns for e in REE_ELEMENTS):
 st.subheader("Computed Ratios Summary")
 ratio_cols = ['Th/La','Ce/Ce*','Nb/Zr','La/Zr','La/Yb','Sr/Y','Gd/Yb','Nd/Nd*','Dy/Yb','Th/Yb','Nb/Yb']
 available = [c for c in ratio_cols if c in df.columns]
-st.dataframe(df[available].describe().T.style.format("{:.2f}"))
+if available:
+    st.dataframe(df[available].describe().T.style.format("{:.2f}"))
+else:
+    st.info("No computed ratios available to summarize.")
 
 # -----------------------------
 # Machine Learning Classification
@@ -189,18 +188,9 @@ if st.button("Run Classification") and features:
     preds = mdl.predict(Xte)
     st.text(classification_report(yte, preds, zero_division=0))
 
-    # Auto-label missing
-    if label_col in df.columns:
-        missing = df[label_col].isna()
-        df.loc[missing, 'Auto_Label'] = pd.Categorical.from_codes(
-            mdl.predict(df.loc[missing, features]),
-            categories=df[label_col].astype('category').cat.categories
-        )
-
 # -----------------------------
 # Export
 # -----------------------------
 st.subheader("Download Results")
 csv_bytes = df.to_csv(index=False).encode()
 st.download_button("📥 Download CSV", data=csv_bytes, file_name="geochem_results.csv", mime="text/csv")
-
