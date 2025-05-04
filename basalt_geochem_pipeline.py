@@ -1,4 +1,4 @@
-# basalt_geochem_pipeline.py
+## basalt_geochem_pipeline.py
 
 import pandas as pd
 import numpy as np
@@ -43,41 +43,49 @@ def load_data(source):
     return df
 
 def filter_basalt_to_basaltic_andesite(df):
-    """Strict 45–57 wt% SiO₂ filter, only if SiO2 exists."""
+    """Strict 45–57 wt% SiO₂ filter, only if SiO₂ exists."""
     if 'SiO2' not in df.columns:
         return df
     return df[(df['SiO2'] >= 45) & (df['SiO2'] <= 57)]
 
 def compute_ratios(df):
-    """Compute all custom geochemical ratios and ε-values."""
+    """Compute all custom geochemical ratios and ε-values, only if inputs exist."""
     eps = 1e-6
-    # major/trace ratios
-    df['Th/La']   = df['Th']  / (df['La']  + eps)
-    df['Ce/Ce*']  = df['Ce']  / (np.sqrt(df['La'] * df['Pr']) + eps)
-    df['Nb/Zr']   = df['Nb']  / (df['Zr']  + eps)
-    df['La/Zr']   = df['La']  / (df['Zr']  + eps)
-    df['La/Yb']   = df['La']  / (df['Yb']  + eps)
-    df['Sr/Y']    = df['Sr']  / (df['Y']   + eps)
-    df['Gd/Yb']   = df['Gd']  / (df['Yb']  + eps)
-    df['Nd/Nd*']  = df['Nd']  / (np.sqrt(df['Pr'] * df['Sm']) + eps)
-    df['Dy/Yb']   = df['Dy']  / (df['Yb']  + eps)
-    df['Th/Yb']   = df['Th']  / (df['Yb']  + eps)
-    df['Nb/Yb']   = df['Nb']  / (df['Yb']  + eps)
-    df['Zr/Y']    = df['Zr']  / (df['Y']   + eps)
-    df['Ti/Zr']   = df['Ti']  / (df['Zr']  + eps)
-    df['Y/Nb']    = df['Y']   / (df['Nb']  + eps)
-    df['Th/Nb']   = df['Th']  / (df['Nb']  + eps)
-    if 'Ti' in df.columns and 'V' in df.columns:
-        df['Ti/V'] = df['Ti'] / (df['V'] + eps)
-    if 'Ti' in df.columns and 'Al' in df.columns:
-        df['Ti/Al']= df['Ti'] / (df['Al']+ eps)
-    # isotope epsilons
+
+    # Helper to add ratio only if both cols exist
+    def add_ratio(out, num, den):
+        if num in df.columns and den in df.columns:
+            df[out] = df[num] / (df[den] + eps)
+
+    # Major/trace ratios
+    add_ratio('Th/La', 'Th', 'La')
+    if all(c in df.columns for c in ['Ce','La','Pr']):
+        df['Ce/Ce*'] = df['Ce'] / (np.sqrt(df['La'] * df['Pr']) + eps)
+    add_ratio('Nb/Zr', 'Nb', 'Zr')
+    add_ratio('La/Zr', 'La', 'Zr')
+    add_ratio('La/Yb', 'La', 'Yb')
+    add_ratio('Sr/Y', 'Sr', 'Y')
+    add_ratio('Gd/Yb', 'Gd', 'Yb')
+    if all(c in df.columns for c in ['Nd','Pr','Sm']):
+        df['Nd/Nd*'] = df['Nd'] / (np.sqrt(df['Pr'] * df['Sm']) + eps)
+    add_ratio('Dy/Yb', 'Dy', 'Yb')
+    add_ratio('Th/Yb', 'Th', 'Yb')
+    add_ratio('Nb/Yb', 'Nb', 'Yb')
+    add_ratio('Zr/Y', 'Zr', 'Y')
+    add_ratio('Ti/Zr', 'Ti', 'Zr')
+    add_ratio('Y/Nb', 'Y', 'Nb')
+    add_ratio('Th/Nb', 'Th', 'Nb')
+    add_ratio('Ti/V', 'Ti', 'V')
+    add_ratio('Ti/Al', 'Ti', 'Al')
+
+    # Isotope epsilon values
     if '143Nd/144Nd' in df.columns:
-        CHUR=0.512638
-        df['εNd'] = ((df['143Nd/144Nd']-CHUR)/CHUR)*1e4
+        CHUR_Nd = 0.512638
+        df['εNd'] = ((df['143Nd/144Nd'] - CHUR_Nd) / CHUR_Nd) * 1e4
     if '176Hf/177Hf' in df.columns:
-        CHUR=0.282785
-        df['εHf'] = ((df['176Hf/177Hf']-CHUR)/CHUR)*1e4
+        CHUR_Hf = 0.282785
+        df['εHf'] = ((df['176Hf/177Hf'] - CHUR_Hf) / CHUR_Hf) * 1e4
+
     return df
 
 def preprocess_list(df_list):
@@ -88,32 +96,29 @@ def preprocess_list(df_list):
     return full
 
 # -----------------------------
-# Streamlit App
+# Streamlit App Layout
 # -----------------------------
 st.title("Basalt & Basaltic-Andesite Geochemistry Interpreter")
 
-st.markdown("""
-Upload your own GEOROC CSV parts **or** load the prepared GEOROC training set from GitHub.
-""")
-
-use_github      = st.checkbox("📦 Load GEOROC parts from GitHub")
-uploaded_parts  = st.file_uploader("Upload split GEOROC CSVs", type="csv", accept_multiple_files=True)
+st.markdown("**Load** GEOROC parts from GitHub **or** **Upload** your own CSVs.")
+use_github     = st.checkbox("📦 Load GEOROC parts from GitHub")
+uploaded_parts = st.file_uploader("Upload split GEOROC CSVs", type="csv", accept_multiple_files=True)
 
 df_list, skipped = [], []
 
 # — GitHub path —
 if use_github:
     base_url = "https://raw.githubusercontent.com/holderds/BasaltChem/main/"
-    filenames = [f"2024-12-2JETOA_part{i}.csv" for i in range(1, 10)]
+    filenames = [f"2024-12-2JETOA_part{i}.csv" for i in range(1, 11)]
     for fn in filenames:
         try:
-            r = requests.get(base_url + fn)
-            part = load_data(StringIO(r.text))
+            resp = requests.get(base_url + fn)
+            part = load_data(StringIO(resp.text))
             if part.isnull().any().any():
                 skipped.append(fn)
                 continue
             df_list.append(part)
-        except Exception:
+        except:
             skipped.append(fn)
     if not df_list:
         st.error("❌ No valid GEOROC parts loaded from GitHub.")
@@ -131,7 +136,7 @@ elif uploaded_parts:
                 skipped.append(uf.name)
                 continue
             df_list.append(part)
-        except Exception:
+        except:
             skipped.append(uf.name)
     if not df_list:
         st.error("❌ All uploaded files were invalid or contained missing data.")
@@ -142,7 +147,7 @@ elif uploaded_parts:
 
 # — Neither chosen —
 else:
-    st.info("▶️ Please select GitHub or upload CSV files to proceed.")
+    st.info("▶️ Please select GitHub or upload files to proceed.")
     st.stop()
 
 # -----------------------------
@@ -160,12 +165,12 @@ if all(e in df.columns for e in REE_ELEMENTS):
         norm = [row[e] / CHONDRITE_VALUES[e] for e in REE_ELEMENTS]
         ax2.plot(REE_ELEMENTS, norm, alpha=0.4)
     ax2.set_yscale('log')
-    ax2.set_title("REE Spider Plot (Chondrite-normalized)")
+    ax2.set_title("REE Spider Plot")
     st.pyplot(fig2)
 
 st.subheader("Computed Ratios Summary")
 ratio_cols = ['Th/La','Ce/Ce*','Nb/Zr','La/Zr','La/Yb','Sr/Y','Gd/Yb','Nd/Nd*','Dy/Yb','Th/Yb','Nb/Yb']
-available  = [c for c in ratio_cols if c in df.columns]
+available = [c for c in ratio_cols if c in df.columns]
 st.dataframe(df[available].describe().T.style.format("{:.2f}"))
 
 # -----------------------------
@@ -183,11 +188,14 @@ if st.button("Run Classification") and features:
     mdl.fit(Xtr, ytr)
     preds = mdl.predict(Xte)
     st.text(classification_report(yte, preds, zero_division=0))
-    # auto-label any missing
-    df.loc[df[label_col].isna(), 'Auto_Label'] = pd.Categorical.from_codes(
-        mdl.predict(df[features]),
-        categories=df[label_col].astype('category').cat.categories
-    )
+
+    # Auto-label missing
+    if label_col in df.columns:
+        missing = df[label_col].isna()
+        df.loc[missing, 'Auto_Label'] = pd.Categorical.from_codes(
+            mdl.predict(df.loc[missing, features]),
+            categories=df[label_col].astype('category').cat.categories
+        )
 
 # -----------------------------
 # Export
@@ -195,3 +203,4 @@ if st.button("Run Classification") and features:
 st.subheader("Download Results")
 csv_bytes = df.to_csv(index=False).encode()
 st.download_button("📥 Download CSV", data=csv_bytes, file_name="geochem_results.csv", mime="text/csv")
+
