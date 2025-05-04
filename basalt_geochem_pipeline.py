@@ -117,7 +117,7 @@ if use_zip:
 
     if skipped_urls:
         st.warning(f"{len(skipped_urls)} file(s) from GitHub skipped due to missing data or error.")
-            skipped_files.append(name)
+        
         if not df_list:
             st.error("All ZIP files were skipped due to missing data.")
             st.stop()
@@ -152,13 +152,7 @@ elif uploaded_files:
 
     if skipped_uploads:
         st.warning(f"{len(skipped_uploads)} uploaded file(s) were skipped due to missing data: {', '.join(skipped_uploads)}")
-    try:
-        df = load_data(uploaded_file)
-        df = filter_basalt_to_basaltic_andesite(df)
-        df = compute_ratios(df)
-    except Exception as e:
-        st.error(f"Error loading or processing data: {e}")
-        st.stop()
+
 else:
     st.warning("Please upload a CSV file or select the example option to begin.")
     st.stop()
