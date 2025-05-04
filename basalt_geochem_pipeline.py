@@ -1,1 +1,1 @@
-# Full content from the user's current canvas script
+# Your full script from the current canvas would be placed here
