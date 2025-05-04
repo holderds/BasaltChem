@@ -73,12 +73,85 @@ def compute_ratios(df):
     return df
 
 # -----------------------------
-# Streamlit Upload and Initialization
+# Streamlit Upload and Initialization + GEOROC example support
 # -----------------------------
 st.title("Basalt and Basaltic Andesite Geochemistry Interpreter")
 
-uploaded_file = st.file_uploader("Upload your geochemical CSV file", type=["csv"])
-if uploaded_file is not None:
+st.write("Or upload multiple GEOROC CSV parts:")
+use_zip = st.checkbox("Load GEOROC training set from ZIP on GitHub")
+uploaded_files = st.file_uploader("Upload split GEOROC parts", type=["csv"], accept_multiple_files=True)
+use_example = st.checkbox("Use cleaned GEOROC dataset example")
+
+if use_zip:
+    import requests
+    from io import StringIO
+
+    github_csv_urls = [
+        "https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part1.csv",
+        "https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part2.csv",
+        "https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part3.csv",
+        "https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part4.csv",
+        "https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part5.csv"
+    ]
+
+    df_list = []
+    skipped_urls = []
+    for url in github_csv_urls:
+        try:
+            response = requests.get(url)
+            df_part = pd.read_csv(StringIO(response.text))
+            if df_part.isnull().any().any():
+                skipped_urls.append(url)
+                continue
+            df_list.append(df_part)
+        except Exception:
+            skipped_urls.append(url)
+
+    if not df_list:
+        st.error("All GitHub CSV files were skipped due to errors or missing data.")
+        st.stop()
+
+    df = pd.concat(df_list, ignore_index=True)
+    df = filter_basalt_to_basaltic_andesite(df)
+    df = compute_ratios(df)
+
+    if skipped_urls:
+        st.warning(f"{len(skipped_urls)} file(s) from GitHub skipped due to missing data or error.")
+            skipped_files.append(name)
+        if not df_list:
+            st.error("All ZIP files were skipped due to missing data.")
+            st.stop()
+        df = pd.concat(df_list, ignore_index=True)
+        df = filter_basalt_to_basaltic_andesite(df)
+        df = compute_ratios(df)
+        if skipped_files:
+            st.warning(f"{len(skipped_files)} file(s) were skipped due to missing data: {', '.join(skipped_files)}")
+    except Exception as e:
+        st.error(f"Error loading from ZIP: {e}")
+        st.stop()
+elif uploaded_files:
+    df_list = []
+    skipped_uploads = []
+    for f in uploaded_files:
+        try:
+            df_part = load_data(f)
+            if df_part.isnull().any().any():
+                skipped_uploads.append(f.name)
+                continue
+            df_list.append(df_part)
+        except Exception:
+            skipped_uploads.append(f.name)
+
+    if not df_list:
+        st.error("All uploaded files were skipped due to missing data.")
+        st.stop()
+
+    df = pd.concat(df_list, ignore_index=True)
+    df = filter_basalt_to_basaltic_andesite(df)
+    df = compute_ratios(df)
+
+    if skipped_uploads:
+        st.warning(f"{len(skipped_uploads)} uploaded file(s) were skipped due to missing data: {', '.join(skipped_uploads)}")
     try:
         df = load_data(uploaded_file)
         df = filter_basalt_to_basaltic_andesite(df)
@@ -87,6 +160,8 @@ if uploaded_file is not None:
         st.error(f"Error loading or processing data: {e}")
         st.stop()
 else:
+    st.warning("Please upload a CSV file or select the example option to begin.")
+    st.stop()
     st.warning("Please upload a CSV file to begin.")
     st.stop()
 
@@ -100,6 +175,27 @@ if 'εNd' in df.columns and 'εHf' in df.columns:
     ax.set_title("εNd vs εHf Isotope Plot")
     st.pyplot(fig)
     st.session_state['last_figure'] = fig
+
+# -----------------------------
+# REE Spider Plot
+if all(elem in df.columns for elem in REE_ELEMENTS):
+    fig2, ax2 = plt.subplots()
+    for _, row in df.iterrows():
+        normed = [row[elem] / CHONDRITE_VALUES.get(elem, 1) for elem in REE_ELEMENTS]
+        ax2.plot(REE_ELEMENTS, normed, alpha=0.5)
+    ax2.set_yscale('log')
+    ax2.set_ylabel('Normalized to Chondrite')
+    ax2.set_title('REE Spider Plot')
+    st.pyplot(fig2)
+    st.session_state['last_figure'] = fig2
+
+# -----------------------------
+# Ratio Preview Summary
+if df is not None:
+    ratio_cols = ['La/Yb', 'Dy/Yb', 'Th/La', 'Ce/Ce*', 'Nb/Zr', 'La/Zr', 'Sr/Y', 'Gd/Yb', 'Nd/Nd*', 'Th/Nb', 'Nb/Yb']
+    existing = [c for c in ratio_cols if c in df.columns]
+    st.subheader("Preview of Computed Ratios")
+    st.dataframe(df[existing].describe().T.style.format(precision=2))
 
 # -----------------------------
 # Configuration
