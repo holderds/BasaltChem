@@ -1,1 +1,1 @@
-<PASTE CONTENT FROM CANVAS HERE>
+# Full content from the user's current canvas script
