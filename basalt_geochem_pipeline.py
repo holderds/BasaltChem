@@ -1,196 +1,227 @@
 # basalt_geochem_pipeline.py
 
-import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import streamlit as st
-import requests
-from io import StringIO
 from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import classification_report
+import streamlit as st
+import io
+import requests
+from io import StringIO
 
 # -----------------------------
-# CONSTANTS
+# Function Definitions
 # -----------------------------
-CHONDRITE_VALUES = {
-    'La':0.234,'Ce':1.59,'Pr':0.456,'Nd':1.23,'Sm':0.298,'Eu':0.123,
-    'Gd':0.27,'Tb':0.10,'Dy':0.26,'Ho':0.059,'Er':0.167,'Tm':0.025,
-    'Yb':0.17,'Lu':0.036
-}
-REE_ELEMENTS = list(CHONDRITE_VALUES.keys())
-MAJOR_OXIDES = ['SiO2','Ti','Al','Fe2O3','MgO','CaO','Na2O','K2O','P2O5']
-ANOMALIES    = ['Ce/Ce*','Eu/Eu*','Nb/Nb*']
 
-# -----------------------------
-# Helpers to clean & coerce
-# -----------------------------
-def sanitize_columns(df):
-    df = df.copy()
-    newcols = []
-    for c in df.columns:
-        x = re.sub(r'\[.*?\]|\(.*?\)|%|wt|ppm','',c)
-        x = re.sub(r'[\s\-\_]+','',x).lower()
-        newcols.append(x)
-    df.columns = newcols
-    # map to standardized names
-    mapping = {
-      'sio2':'SiO2','tio2':'Ti','al2o3':'Al','fe2o3t':'Fe2O3',
-      'mgo':'MgO','cao':'CaO','na2o':'Na2O','k2o':'K2O','p2o5':'P2O5',
-      'th':'Th','nb':'Nb','zr':'Zr','y':'Y','sr':'Sr','la':'La','ce':'Ce',
-      'pr':'Pr','nd':'Nd','sm':'Sm','eu':'Eu','gd':'Gd','tb':'Tb','dy':'Dy',
-      'ho':'Ho','er':'Er','tm':'Tm','yb':'Yb','lu':'Lu','v':'V','sc':'Sc',
-      'co':'Co','ni':'Ni','cr':'Cr','hf':'Hf','ta':'Ta',
-      '143nd/144nd':'143Nd/144Nd','176hf/177hf':'176Hf/177Hf',
-      '87sr/86sr':'87Sr/86Sr','206pb/204pb':'206Pb/204Pb','207pb/204pb':'207Pb/204Pb'
+def load_data(src):
+    """Read CSV and rename GEOROC columns into simple element names."""
+    df = pd.read_csv(src, low_memory=False)
+    rename = {
+        'SiO2 [wt%]': 'SiO2',
+        'TiO2 [wt%]': 'Ti',
+        'Al2O3 [wt%]': 'Al',
+        'Fe2O3(t) [wt%]': 'Fe2O3',
+        'MgO [wt%]': 'MgO',
+        'CaO [wt%]': 'CaO',
+        'Na2O [wt%]': 'Na2O',
+        'K2O [wt%]': 'K2O',
+        'P2O5 [wt%]': 'P2O5',
+        # trace & REE
+        **{f'{el} [ppm]': el for el in [
+            'Th','Nb','Zr','Y','La','Ce','Pr','Nd','Sm','Eu',
+            'Gd','Tb','Dy','Ho','Er','Tm','Yb','Lu','V','Sc','Co','Ni','Cr','Hf'
+        ]},
+        # add Sr!
+        'Sr [ppm]': 'Sr',
+        # isotopes
+        '87Sr/86Sr': 'Sr87_86',
+        '206Pb/204Pb': 'Pb206_204',
+        '207Pb/204Pb': 'Pb207_204',
+        '143Nd/144Nd': 'Nd143_144',
+        '176Hf/177Hf': 'Hf176_177'
     }
-    return df.rename(columns=mapping)
-
-def load_data(source):
-    # source can be a filename or file‐like
-    df = pd.read_csv(source, low_memory=False)
-    df = sanitize_columns(df)
-    # force everything to numeric; non‐parsable → NaN
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df.rename(columns=rename, inplace=True)
     return df
 
-# -----------------------------
-# Ratio computation & filtering
-# -----------------------------
-def filter_si(df):
-    if 'SiO2' not in df.columns:
-        return df.iloc[0:0]
-    return df[(df['SiO2']>=45)&(df['SiO2']<=57)]
+def filter_basalt_to_basaltic_andesite(df):
+    """Keep only samples with 45–57 wt% SiO₂."""
+    return df[(df['SiO2'] >= 45) & (df['SiO2'] <= 57)]
 
 def compute_ratios(df):
-    eps=1e-6
-    R=lambda n,d,name: df.__setitem__(name, df[n]/(df[d]+eps)) if n in df and d in df else None
+    """Compute custom geochemical ratios and ε-isotope values."""
+    eps = 1e-6
 
-    # classic ratios
-    R('Th','La','Th/La')
-    if all(e in df for e in ('Ce','La','Pr')): df['Ce/Ce*']=df['Ce']/np.sqrt(df['La']*df['Pr']+eps)
-    if all(e in df for e in ('Eu','Sm','Gd')): df['Eu/Eu*']=df['Eu']/np.sqrt(df['Sm']*df['Gd']+eps)
-    if all(e in df for e in ('Nb','Zr','Ta')): df['Nb/Nb*']=df['Nb']/np.sqrt(df['Zr']*df['Ta']+eps)
+    # Major‐trace ratios
+    df['Th/La']  = df['Th']  / (df['La'] + eps)
+    df['Ce/Ce*'] = df['Ce']  / (np.sqrt(df['La'] * df['Pr']) + eps)
+    df['Nb/Zr']  = df['Nb']  / (df['Zr'] + eps)
+    df['La/Zr']  = df['La']  / (df['Zr'] + eps)
+    df['La/Yb']  = df['La']  / (df['Yb'] + eps)
+    df['Sr/Y']   = df['Sr']  / (df['Y']  + eps)
+    df['Gd/Yb']  = df['Gd']  / (df['Yb'] + eps)
+    df['Nd/Nd*'] = df['Nd']  / (np.sqrt(df['Pr'] * df['Sm']) + eps)
+    df['Dy/Yb']  = df['Dy']  / (df['Yb'] + eps)
+    df['Th/Yb']  = df['Th']  / (df['Yb'] + eps)
+    df['Nb/Yb']  = df['Nb']  / (df['Yb'] + eps)
+    df['Zr/Y']   = df['Zr']  / (df['Y']  + eps)
+    if 'Ti' in df.columns and 'V' in df.columns:
+        df['Ti/V'] = df['Ti'] / (df['V'] + eps)
+    if 'Ti' in df.columns and 'Al' in df.columns:
+        df['Ti/Al'] = df['Ti'] / (df['Al'] + eps)
 
-    for n,d in [
-      ('Nb','Zr'),('La','Zr'),('La','Yb'),
-      ('Sr','Y'),('Gd','Yb'),('Dy','Yb'),
-      ('Th','Yb'),('Nb','Yb'),('Zr','Y'),
-      ('Ti','Zr'),('Ti','Al'),('Y','Nb'),
-      ('Th','Nb'),('Ti','V')
-    ]:
-        R(n,d,f"{n}/{d}")
+    # Sm/Nd ratio
+    df['Sm/Nd'] = df['Sm'] / (df['Nd'] + eps)
 
-    # isotopic eps
-    if '143Nd/144Nd' in df:
-        CH=0.512638; df['εNd']=(df['143Nd/144Nd']-CH)/CH*1e4
-    if '176Hf/177Hf' in df:
-        CH=0.282785; df['εHf']=(df['176Hf/177Hf']-CH)/CH*1e4
+    # εNd, εHf
+    if 'Nd143_144' in df.columns:
+        CHUR_Nd = 0.512638
+        df['εNd'] = ((df['Nd143_144'] - CHUR_Nd) / CHUR_Nd) * 1e4
+    if 'Hf176_177' in df.columns:
+        CHUR_Hf = 0.282785
+        df['εHf'] = ((df['Hf176_177'] - CHUR_Hf) / CHUR_Hf) * 1e4
+
+    # Composite indices
+    df['Crustal_Thickness_Index']     = df['Dy/Yb']
+    df['Melting_Depth_Index']         = df['La/Yb']
+    df['Crustal_Contamination_Index'] = df['Th/Nb']
+    df['Mantle_Fertility_Index']      = df['Nb/Zr']
 
     return df
 
-def preprocess(parts):
-    full = pd.concat(parts, ignore_index=True)
-    full = filter_si(full)
-    return compute_ratios(full)
+def preprocess_list(df_list):
+    """Concatenate parts, filter, and compute all ratios."""
+    full = pd.concat(df_list, ignore_index=True)
+    full = filter_basalt_to_basaltic_andesite(full)
+    full = compute_ratios(full)
+    return full
 
 # -----------------------------
-# STREAMLIT UI
+# Streamlit App
 # -----------------------------
-st.title("Basalt & Andesite Geochemistry Interpreter")
+st.title("Basalt & Basaltic Andesite Geochem Interpreter")
 
-use_gh     = st.checkbox("Load GEOROC CSVs from GitHub")
-uploaded   = st.file_uploader("…or upload your CSV parts", type="csv", accept_multiple_files=True)
+st.write("Load GEOROC CSV parts or use example dataset:")
+use_zip        = st.checkbox("Load GEOROC training set from GitHub CSVs")
+uploaded_files = st.file_uploader("Upload split GEOROC parts", type=["csv"], accept_multiple_files=True)
+use_example    = st.checkbox("Use cleaned example dataset")
 
-parts=[]
-skipped=[]
+df = None
+skipped = []
 
-if use_gh:
-    base = "https://raw.githubusercontent.com/holderds/BasaltChem/main/"
-    gh_files = [
-      "2024-12-2JETOA_THOLEIITIC_BASALT_part1.csv",
-      "2024-12-2JETOA_THOLEIITIC_BASALT_part2.csv",
-      # add all your split filenames…
+if use_zip:
+    urls = [
+        f"https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part{i}.csv"
+        for i in range(1,6)
     ]
-    for fn in gh_files:
+    parts = []
+    for u in urls:
         try:
-            txt = requests.get(base+fn).text
-            dfp = load_data(StringIO(txt))
-            dfp = dfp.dropna(subset=['SiO2'])
-            if dfp.empty: skipped.append(fn)
-            else:          parts.append(dfp)
-        except:
-            skipped.append(fn)
+            r = requests.get(u)
+            part = pd.read_csv(StringIO(r.text), low_memory=False)
+            parts.append(part)
+        except Exception:
+            skipped.append(u)
+    if not parts:
+        st.error("❌ No valid GEOROC parts loaded from GitHub.")
+        st.stop()
+    df = preprocess_list(parts)
 
-elif uploaded:
-    for f in uploaded:
-        dfp = load_data(f)
-        dfp = dfp.dropna(subset=['SiO2'])
-        if dfp.empty: skipped.append(f.name)
-        else:          parts.append(dfp)
+elif uploaded_files:
+    parts = []
+    for f in uploaded_files:
+        try:
+            part = load_data(f)
+            parts.append(part)
+        except Exception:
+            skipped.append(f.name)
+    if not parts:
+        st.error("❌ No valid uploads.")
+        st.stop()
+    df = preprocess_list(parts)
+
+elif use_example:
+    example_url = "https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part1.csv"
+    r = requests.get(example_url)
+    df = pd.read_csv(StringIO(r.text), low_memory=False)
+    df = filter_basalt_to_basaltic_andesite(df)
+    df = compute_ratios(df)
 
 else:
-    st.info("☞ Please select GitHub or upload CSVs to begin.")
+    st.warning("Please choose an input method above.")
     st.stop()
 
-if not parts:
-    st.error("❌ No valid data loaded—check your file(s).")
-    st.stop()
-
-df = preprocess(parts)
 if skipped:
-    st.warning("⚠ Skipped: " + ", ".join(skipped))
+    st.warning("Skipped: " + ", ".join(skipped))
 
-# εNd vs εHf
-if {'εNd','εHf'}.issubset(df.columns):
-    fig,ax=plt.subplots()
-    ax.scatter(df['εNd'],df['εHf'],alpha=0.6)
-    ax.set(xlabel="εNd",ylabel="εHf",title="εNd vs εHf")
+# -----------------------------
+# εNd vs εHf Isotope Scatter
+if 'εNd' in df.columns and 'εHf' in df.columns:
+    fig, ax = plt.subplots()
+    ax.scatter(df['εNd'], df['εHf'], alpha=0.6)
+    ax.set_xlabel("εNd")
+    ax.set_ylabel("εHf")
+    ax.set_title("εNd vs εHf")
     st.pyplot(fig)
+    st.session_state['last_fig'] = fig
 
-# REE spider
+# -----------------------------
+# REE Spider Plot
+REE_ELEMENTS = ['La','Ce','Pr','Nd','Sm','Eu','Gd','Tb','Dy','Ho','Er','Tm','Yb','Lu']
+CHONDRITE = {'La':0.237,'Ce':1.59,'Pr':0.49,'Nd':1.23,'Sm':0.28,'Eu':0.11,'Gd':0.27,'Tb':0.04,'Dy':0.26,'Ho':0.05,'Er':0.17,'Tm':0.02,'Yb':0.17,'Lu':0.03}
+
 if all(e in df.columns for e in REE_ELEMENTS):
-    fig,ax=plt.subplots()
-    for _,r in df.iterrows():
-        ax.plot(REE_ELEMENTS, [r[e]/CHONDRITE_VALUES[e] for e in REE_ELEMENTS],alpha=0.3)
-    ax.set(yscale='log',title="REE Spider Plot")
-    st.pyplot(fig)
+    fig2, ax2 = plt.subplots()
+    for _, row in df.iterrows():
+        norm = [row[e]/CHONDRITE[e] for e in REE_ELEMENTS]
+        ax2.plot(REE_ELEMENTS, norm, alpha=0.4)
+    ax2.set_yscale('log')
+    ax2.set_title("REE Spider Plot")
+    st.pyplot(fig2)
+    st.session_state['last_fig'] = fig2
 
-# Ratio summary
-st.subheader("Computed Ratios & Oxides")
-all_cols = MAJOR_OXIDES + REE_ELEMENTS + ANOMALIES + [
-    'Nb/Zr','La/Zr','La/Yb','Sr/Y','Gd/Yb','Dy/Yb',
-    'Th/Yb','Nb/Yb','Zr/Y','Ti/Zr','Ti/Al','Y/Nb',
-    'Th/Nb','Ti/V','εNd','εHf'
-]
-avail = [c for c in all_cols if c in df.columns]
-if avail:
-    st.dataframe(df[avail].describe().T.style.format("{:.2f}"))
+# -----------------------------
+# Summary of Ratios
+ratio_cols = ['Th/La','Ce/Ce*','Nb/Zr','La/Zr','La/Yb','Sr/Y','Gd/Yb','Nd/Nd*','Dy/Yb','Th/Yb','Nb/Yb']
+available = [c for c in ratio_cols if c in df.columns]
+if available:
+    st.subheader("Computed Ratios Summary")
+    st.dataframe(df[available].describe().T.style.format("{:.2f}"))
 else:
-    st.warning(
-      "No ratios computed—your data must have at least one of: " +
-      ", ".join(set(MAJOR_OXIDES+REE_ELEMENTS))
-    )
+    st.error("No ratios computed—check that your data contain the required elements.")
 
-# ML classification
-st.subheader("ML Classification (Tectonic Setting)")
-labels = [c for c in df.columns if df[c].nunique()<20]
-defaults = [c for c in all_cols if c in df.columns]
+# -----------------------------
+# Download & Export
+if st.button("Download All Results as CSV"):
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download", data=csv, file_name="basalt_geochem_results.csv", mime="text/csv")
 
-label_col = st.selectbox("Label column", labels, index=0)
-features  = st.multiselect("Features", df.select_dtypes(float).columns, default=defaults)
+if 'last_fig' in st.session_state:
+    buf = io.BytesIO()
+    st.session_state['last_fig'].savefig(buf, format="png")
+    st.download_button("📷 Download Last Plot", data=buf.getvalue(), file_name="last_plot.png", mime="image/png")
 
-if st.button("Run Classification") and features:
-    dfc = df.dropna(subset=features+[label_col])
-    X,y = dfc[features], dfc[label_col].astype('category').cat.codes
-    xtr,xte,ytr,yte = train_test_split(X,y,test_size=0.3,random_state=42)
-    model = MLPClassifier((50,25),max_iter=500,early_stopping=True,random_state=42)
-    model.fit(xtr,ytr)
-    st.text(classification_report(yte, model.predict(xte), zero_division=0))
+# -----------------------------
+# ML Classification
+st.subheader("Supervised Classification: Tectonic Setting")
+label_col = st.selectbox("Label column", [c for c in df.columns if df[c].nunique() < 20])
+features  = st.multiselect("Features", df.select_dtypes("number").columns.tolist())
 
-# Download
-st.subheader("Download Processed Data")
-st.download_button("📥 CSV", df.to_csv(index=False).encode(),
-                   file_name="processed_geochem.csv", mime="text/csv")
+if label_col and features:
+    df_cl = df.dropna(subset=[label_col]+features)
+    X = df_cl[features]
+    y = df_cl[label_col].astype('category').cat.codes
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+    model = MLPClassifier((50,25), max_iter=500, random_state=42)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    report = classification_report(y_test, y_pred, zero_division=0)
+    st.text("Classification Report:")
+    st.text(report)
+
+    # Attach predictions
+    df['Predicted_Label'] = None
+    df.loc[df_cl.index, 'Predicted_Label'] = model.predict(X)
+
