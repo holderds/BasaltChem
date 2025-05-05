@@ -1,7 +1,6 @@
 # basalt_load_and_clean.py
 
 import pandas as pd
-import numpy as np
 import streamlit as st
 
 st.set_page_config(page_title="Basalt Load & Clean", layout="wide")
@@ -56,15 +55,23 @@ errors = []
 for fname in CSV_FILES:
     url = BASE_URL + fname
     try:
-        df = pd.read_csv(url, low_memory=False)
-        # rename
-        df = df.rename(columns=RENAME_MAP)
-        # coerce all columns to numeric where possible
-        for col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        dfs.append(df)
+        # try utf-8
+        df = pd.read_csv(url, low_memory=False, encoding="utf-8")
+    except UnicodeDecodeError:
+        # fallback to latin1
+        df = pd.read_csv(url, low_memory=False, encoding="latin1")
     except Exception as e:
         errors.append(f"{fname}: {e}")
+        continue
+
+    # rename columns
+    df = df.rename(columns=RENAME_MAP)
+
+    # coerce to numeric (non-convertible → NaN)
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    dfs.append(df)
 
 # 4) Report load results
 st.write(f"**Successfully loaded** {len(dfs)} of {len(CSV_FILES)} files.")
