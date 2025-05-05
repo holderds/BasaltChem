@@ -3,133 +3,166 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import streamlit as st
+import io
+import requests
+from io import StringIO
 from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import classification_report
-import streamlit as st
-import io
 
 # -----------------------------
-# Function Definitions
+# Utility Functions
 # -----------------------------
 
-def load_data(upload):
-    """Read a CSV and rename GEOROC column names to our short names."""
-    df = pd.read_csv(upload)
+def load_data(source):
+    """
+    Load a CSV (either a file-like or a URL text buffer),
+    rename GEOROC columns to short names, coerce to numeric.
+    """
+    df = pd.read_csv(source)
+    # Standardize column names:
     rename_map = {
         'SiO2 [wt%]': 'SiO2', 'TiO2 [wt%]': 'Ti', 'Al2O3 [wt%]': 'Al', 'Fe2O3(t) [wt%]': 'Fe2O3',
         'MgO [wt%]': 'MgO', 'CaO [wt%]': 'CaO', 'Na2O [wt%]': 'Na2O', 'K2O [wt%]': 'K2O',
-        'P2O5 [wt%]': 'P2O5', 'Th [ppm]': 'Th', 'Nb [ppm]': 'Nb', 'Zr [ppm]': 'Zr',
-        'Y [ppm]': 'Y', 'La [ppm]': 'La', 'Ce [ppm]': 'Ce', 'Pr [ppm]': 'Pr', 'Nd [ppm]': 'Nd',
-        'Sm [ppm]': 'Sm', 'Eu [ppm]': 'Eu', 'Gd [ppm]': 'Gd', 'Tb [ppm]': 'Tb', 'Dy [ppm]': 'Dy',
-        'Ho [ppm]': 'Ho', 'Er [ppm]': 'Er', 'Tm [ppm]': 'Tm', 'Yb [ppm]': 'Yb', 'Lu [ppm]': 'Lu',
-        'V [ppm]': 'V', 'Sc [ppm]': 'Sc', 'Co [ppm]': 'Co', 'Ni [ppm]': 'Ni', 'Cr [ppm]': 'Cr', 'Hf [ppm]': 'Hf'
+        'P2O5 [wt%]': 'P2O5',
+        'Th [ppm]': 'Th', 'Nb [ppm]': 'Nb', 'Zr [ppm]': 'Zr', 'Y [ppm]': 'Y',
+        'La [ppm]': 'La', 'Ce [ppm]': 'Ce', 'Pr [ppm]': 'Pr', 'Nd [ppm]': 'Nd',
+        'Sm [ppm]': 'Sm', 'Eu [ppm]': 'Eu', 'Gd [ppm]': 'Gd', 'Tb [ppm]': 'Tb',
+        'Dy [ppm]': 'Dy', 'Ho [ppm]': 'Ho', 'Er [ppm]': 'Er', 'Tm [ppm]': 'Tm',
+        'Yb [ppm]': 'Yb', 'Lu [ppm]': 'Lu',
+        'V [ppm]': 'V', 'Sc [ppm]': 'Sc', 'Co [ppm]': 'Co', 'Ni [ppm]': 'Ni',
+        'Cr [ppm]': 'Cr', 'Hf [ppm]': 'Hf'
     }
     df.rename(columns=rename_map, inplace=True)
+
+    # Coerce everything to numeric (bad entries → NaN)
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
     return df
 
 def filter_basaltic(df):
-    """Keep only 45–57 wt% SiO2."""
+    """Keep only samples with 45–57 wt% SiO₂."""
     return df.loc[(df["SiO2"] >= 45) & (df["SiO2"] <= 57)]
 
 def compute_ratios(df):
-    """Compute all custom geochemical ratios and ε-values."""
+    """Compute your custom ratios and ε-values."""
     eps = 1e-6
-    # example ratio computations...
-    df['Th/La']  = df['Th'] / (df['La'] + eps)
-    df['Ce/Ce*'] = df['Ce'] / (np.sqrt(df['La'] * df['Pr']) + eps)
-    df['Nb/Zr']  = df['Nb'] / (df['Zr'] + eps)
-    # ... (rest of your ratios)
+    # Major/trace ratios
+    df['Th/La']   = df['Th'] / (df['La'] + eps)
+    df['Ce/Ce*']  = df['Ce'] / (np.sqrt(df['La'] * df['Pr']) + eps)
+    df['Nb/Zr']   = df['Nb'] / (df['Zr'] + eps)
+    df['La/Zr']   = df['La'] / (df['Zr'] + eps)
+    df['La/Yb']   = df['La'] / (df['Yb'] + eps)
+    df['Sr/Y']    = df['Sr'] / (df['Y'] + eps)
+    df['Gd/Yb']   = df['Gd'] / (df['Yb'] + eps)
+    df['Nd/Nd*']  = df['Nd'] / (np.sqrt(df['Pr'] * df['Sm']) + eps)
+    df['Dy/Yb']   = df['Dy'] / (df['Yb'] + eps)
+    df['Th/Yb']   = df['Th'] / (df['Yb'] + eps)
+    df['Nb/Yb']   = df['Nb'] / (df['Yb'] + eps)
+    df['Zr/Y']    = df['Zr'] / (df['Y'] + eps)
+    if 'Ti' in df.columns and 'V' in df.columns:
+        df['Ti/V'] = df['Ti'] / (df['V'] + eps)
+    if 'Ti' in df.columns and 'Al' in df.columns:
+        df['Ti/Al'] = df['Ti'] / (df['Al'] + eps)
+
+    # ε-values (if isotopes are present)
+    if '143Nd/144Nd' in df.columns:
+        CHUR_Nd = 0.512638
+        df['εNd'] = ((df['143Nd/144Nd'] - CHUR_Nd) / CHUR_Nd) * 1e4
+    if '176Hf/177Hf' in df.columns:
+        CHUR_Hf = 0.282785
+        df['εHf'] = ((df['176Hf/177Hf'] - CHUR_Hf) / CHUR_Hf) * 1e4
+    if '206Pb/204Pb' in df.columns and '207Pb/204Pb' in df.columns:
+        df['Pb_iso'] = df['206Pb/204Pb'] / (df['207Pb/204Pb'] + eps)
+
     return df
 
+def preprocess_list(sources, from_url=False):
+    """
+    Given a list of either file-like objects or URLs, 
+    load_data → drop rows missing SiO2 → concatenate → filter → compute ratios.
+    Returns (df, skipped_list).
+    """
+    df_parts = []
+    skipped = []
+
+    for src in sources:
+        try:
+            if from_url:
+                resp = requests.get(src)
+                data = StringIO(resp.text)
+                part = load_data(data)
+            else:
+                part = load_data(src)
+
+            # drop any row missing our key column
+            part = part.dropna(subset=["SiO2"])
+            if part.empty:
+                skipped.append(src if not from_url else src)
+                continue
+
+            df_parts.append(part)
+
+        except Exception:
+            skipped.append(src)
+
+    if not df_parts:
+        return None, skipped
+
+    df = pd.concat(df_parts, ignore_index=True)
+    df = filter_basaltic(df)
+    df = compute_ratios(df)
+    return df, skipped
+
 # -----------------------------
-# Streamlit App
+# Streamlit UI
 # -----------------------------
-st.title("Basalt and Basaltic Andesite Geochemistry Interpreter")
+st.title("Basalt & Basaltic Andesite Geochemistry Interpreter")
 
-st.write("Or load the cleaned GEOROC training set from GitHub:")
-use_zip = st.checkbox("Load GEOROC training set from GitHub CSVs")
-uploaded_files = st.file_uploader("Or upload your own split GEOROC CSVs", type="csv", accept_multiple_files=True)
+st.write("Either load the cleaned GEOROC parts from GitHub or upload your own CSVs:")
+use_github = st.checkbox("▶ Load cleaned GEOROC parts from GitHub")
+uploaded = st.file_uploader("Or upload split GEOROC CSV parts", type="csv", accept_multiple_files=True)
 
-if use_zip:
-    import requests
-    from io import StringIO
-
-    github_csv_urls = [
-        "https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part1.csv",
-        "https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part2.csv",
-        # etc...
+if use_github:
+    urls = [
+        "https://raw.githubusercontent.com/holderds/BasaltChem/main/example_data/cleaned_georoc_basalt_part1.csv",
+        "https://raw.githubusercontent.com/holderds/BasaltChem/main/example_data/cleaned_georoc_basalt_part2.csv",
+        "https://raw.githubusercontent.com/holderds/BasaltChem/main/example_data/cleaned_georoc_basalt_part3.csv",
+        "https://raw.githubusercontent.com/holderds/BasaltChem/main/example_data/cleaned_georoc_basalt_part4.csv",
+        "https://raw.githubusercontent.com/holderds/BasaltChem/main/example_data/cleaned_georoc_basalt_part5.csv",
     ]
-    df_list = []
-    skipped = []
-    for url in github_csv_urls:
-        try:
-            r = requests.get(url)
-            # 1) rename columns
-            df_part = load_data(StringIO(r.text))
-            # 2) force numeric
-            for c in df_part.columns:
-                df_part[c] = pd.to_numeric(df_part[c], errors="coerce")
-            # 3) drop rows missing SiO2
-            df_part = df_part.dropna(subset=["SiO2"])
-            if df_part.empty:
-                skipped.append(url)
-                continue
-            df_list.append(df_part)
-        except Exception:
-            skipped.append(url)
+    df, skipped = preprocess_list(urls, from_url=True)
 
-    if not df_list:
-        st.error("❌ Could not load any valid GEOROC parts.")
+    if df is None:
+        st.error("❌ Could not load any valid GEOROC parts from GitHub.")
         st.stop()
 
-    # concat + cleanup + filter + ratios
-    df = pd.concat(df_list, ignore_index=True)
-    df = df.dropna(subset=["SiO2"])
-    df = filter_basaltic(df)
-    df = compute_ratios(df)
-
     if skipped:
-        st.warning(f"⚠ Skipped {len(skipped)} URL(s) due to missing data or errors.")
+        st.warning(f"⚠ Skipped {len(skipped)} GitHub URL(s) due to errors or missing SiO₂.")
 
-elif uploaded_files:
-    df_list = []
-    skipped = []
-    for f in uploaded_files:
-        try:
-            df_part = load_data(f)
-            for c in df_part.columns:
-                df_part[c] = pd.to_numeric(df_part[c], errors="coerce")
-            df_part = df_part.dropna(subset=["SiO2"])
-            if df_part.empty:
-                skipped.append(f.name)
-                continue
-            df_list.append(df_part)
-        except Exception:
-            skipped.append(f.name)
+elif uploaded:
+    df, skipped = preprocess_list(uploaded, from_url=False)
 
-    if not df_list:
-        st.error("❌ Could not load any valid uploaded files.")
+    if df is None:
+        st.error("❌ Could not load any valid uploaded CSVs.")
         st.stop()
 
-    df = pd.concat(df_list, ignore_index=True)
-    df = df.dropna(subset=["SiO2"])
-    df = filter_basaltic(df)
-    df = compute_ratios(df)
-
     if skipped:
-        st.warning(f"⚠ Skipped {len(skipped)} file(s): {', '.join(skipped)}")
+        st.warning(f"⚠ Skipped {len(skipped)} uploaded file(s): {', '.join(getattr(f,'name',str(f)) for f in skipped)}")
 
 else:
-    st.warning("Please either select the GitHub option or upload CSV files.")
+    st.warning("Please select **Load from GitHub** or upload at least one CSV.")
     st.stop()
 
 # -----------------------------
-# Now the rest of your plotting & ML code can assume `df` has a valid SiO2 column
+# Data is now loaded into `df` with:
+#   • SiO2 guaranteed numeric, filtered to 45–57 wt%
+#   • All custom ratios & ε-values computed
 # -----------------------------
-st.write(f"✅ Loaded {len(df)} samples after filtering to 45–57 wt% SiO₂.")
 
-# e.g. show a quick preview
+st.success(f"✅ Loaded **{len(df)}** samples (45–57 wt% SiO₂) with all ratios computed.")
 st.dataframe(df.head())
 
-# ...insert your εNd vs εHf plot, REE spider plot, ratio summaries, and ML classification here...
+# — Insert your plotting, ratio summaries, and ML sections below —
