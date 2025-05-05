@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Basalt Load & Clean", layout="wide")
-st.title("Basalt Training Data: Load & Clean")
+st.title("Basalt Training Data: Load, Clean, and Inspect")
 
 # 1) List of all CSVs in the repo with prefix "2024-12-2JETOA_"
 BASE_URL = "https://raw.githubusercontent.com/holderds/basaltchem/main/"
@@ -64,10 +64,13 @@ for fname in CSV_FILES:
         errors.append(f"{fname}: {e}")
         continue
 
+    # tag each row with its source file
+    df['source_file'] = fname
+
     # rename columns
     df = df.rename(columns=RENAME_MAP)
 
-    # coerce to numeric (non-convertible → NaN)
+    # coerce everything possible to numeric (bad → NaN)
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -86,9 +89,17 @@ if not dfs:
 # 5) Concatenate
 df_all = pd.concat(dfs, ignore_index=True)
 
-st.subheader("Combined DataFrame Preview")
+# 6) Preview & full table
+st.subheader("Combined DataFrame")
 st.write(f"Shape: {df_all.shape}")
-st.dataframe(df_all.head(10))
+st.dataframe(df_all)  # scrollable, shows all rows
 
+# 7) Quick statistics on numeric columns
+numeric_cols = df_all.select_dtypes("number").columns.tolist()
+if numeric_cols:
+    st.subheader("Summary Statistics")
+    st.dataframe(df_all[numeric_cols].describe().T.style.format("{:.2f}"))
+
+# 8) List of columns
 st.subheader("Column List")
 st.write(df_all.columns.tolist())
