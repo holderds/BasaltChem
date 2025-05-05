@@ -4,205 +4,186 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import io
 import requests
+import io
 from io import StringIO
 from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import classification_report
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(layout="wide")
 st.title("Basalt & Basaltic Andesite Geochemistry Interpreter")
 
-GITHUB_USER = "holderds"
-GITHUB_REPO = "basaltchem"
-PREFIX      = "2024-12-2JETOA"
-ESSENTIAL_SI = "SiO2"
-
-# raw→clean column mapping
-RENAME_MAP = {
-    'SiO2 [wt%]': 'SiO2', 'TiO2 [wt%]': 'Ti', 'Al2O3 [wt%]': 'Al',
-    'Fe2O3(t) [wt%]': 'Fe2O3', 'MgO [wt%]': 'MgO', 'CaO [wt%]': 'CaO',
-    'Na2O [wt%]': 'Na2O', 'K2O [wt%]': 'K2O', 'P2O5 [wt%]': 'P2O5',
-    **{f"{el} [ppm]": el for el in [
-        'Sr','Th','Nb','Zr','Y','La','Ce','Pr','Nd','Sm','Eu',
-        'Gd','Tb','Dy','Ho','Er','Tm','Yb','Lu','V','Sc','Co','Ni','Cr','Hf'
-    ]},
-    '87Sr/86Sr': 'Sr87_86',
-    '206Pb/204Pb':'Pb206_204','207Pb/204Pb':'Pb207_204',
-    '143Nd/144Nd':'Nd143_144','176Hf/177Hf':'Hf176_177'
-}
-
-REE_LIST = ['La','Ce','Pr','Nd','Sm','Eu','Gd','Tb','Dy','Ho','Er','Tm','Yb','Lu']
-CHONDRITE = {
-    'La':0.237,'Ce':1.59,'Pr':0.49,'Nd':1.23,'Sm':0.28,
-    'Eu':0.11,'Gd':0.27,'Tb':0.04,'Dy':0.26,'Ho':0.05,
-    'Er':0.17,'Tm':0.02,'Yb':0.17,'Lu':0.03
-}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ──────────────────────────────────────────────────────────────────────────────
-
-def list_github_csvs(prefix):
-    """List all .csv files in the repo whose path starts with prefix"""
-    url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/git/trees/main?recursive=1"
-    resp = requests.get(url)
-    resp.raise_for_status()
-    tree = resp.json().get("tree", [])
-    return [item["path"] for item in tree
-            if item["path"].startswith(prefix) and item["path"].endswith(".csv")]
-
-def load_and_clean(source):
-    """
-    Read everything as string → rename → coerce to numeric → drop missing SiO2.
-    Accepts local file handles or URLs.
-    """
-    df = pd.read_csv(source, dtype=str)
-    df.rename(columns=RENAME_MAP, inplace=True)
-    for clean in RENAME_MAP.values():
-        if clean in df.columns:
-            df[clean] = pd.to_numeric(df[clean], errors="coerce")
-    df.dropna(subset=[ESSENTIAL_SI], inplace=True)
+# -----------------------------
+# Utility functions
+# -----------------------------
+def clean_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop empty rows/cols, sanitize column names, coerce to numeric."""
+    df = df.dropna(axis=0, how="all").dropna(axis=1, how="all")
+    cols = (
+        df.columns
+          .str.replace(r"\[.*\]", "", regex=True)
+          .str.replace(r"[^0-9A-Za-z_/\.]", "_", regex=True)
+          .str.replace("/", "_")
+          .str.strip()
+    )
+    df.columns = cols
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
-def filter_si(df):
-    """Keep only basalt & basaltic andesite (45–57 wt% SiO₂)."""
-    return df[(df["SiO2"] >= 45) & (df["SiO2"] <= 57)]
+def filter_basalt(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only 45–57 wt% SiO2."""
+    return df.loc[(df.SiO2 >= 45) & (df.SiO2 <= 57)]
 
-def compute_ratios(df):
+def compute_ratios(df: pd.DataFrame) -> pd.DataFrame:
+    """Add custom geochemical ratios & anomalies."""
     eps = 1e-6
-    def R(a,b,name):
-        if a in df.columns and b in df.columns:
-            df[name] = df[a] / (df[b] + eps)
-    # major/trace
-    R("Th","La","Th/La")
-    if all(c in df.columns for c in ["La","Pr","Ce"]):
-        df["Ce/Ce*"] = df["Ce"] / np.sqrt(df["La"]*df["Pr"] + eps)
-    R("Nb","Zr","Nb/Zr"); R("La","Zr","La/Zr"); R("La","Yb","La/Yb")
-    R("Sr","Y","Sr/Y"); R("Gd","Yb","Gd/Yb"); 
-    if all(c in df.columns for c in ["Nd","Pr","Sm"]):
-        df["Nd/Nd*"] = df["Nd"]/np.sqrt(df["Pr"]*df["Sm"]+eps)
-    R("Dy","Yb","Dy/Yb"); R("Th","Yb","Th/Yb"); R("Nb","Yb","Nb/Yb")
-    R("Zr","Y","Zr/Y"); R("Ti","V","Ti/V"); R("Ti","Al","Ti/Al")
-    R("Sm","Nd","Sm/Nd")
-    # isotopic
-    if "Nd143_144" in df: df["εNd"] = (df["Nd143_144"]-0.512638)/0.512638*1e4
-    if "Hf176_177" in df: df["εHf"] = (df["Hf176_177"]-0.282785)/0.282785*1e4
-    # composite
-    df["Crustal_Thickness_Index"]    = df.get("Dy/Yb")
-    df["Melting_Depth_Index"]        = df.get("La/Yb")
-    df["Crustal_Contamination_Index"]= df.get("Th/Nb")
-    df["Mantle_Fertility_Index"]     = df.get("Nb/Zr")
+    # Basic ratios
+    df["Th_La"]   = df.Th  / (df.La  + eps)
+    df["Ce_Ce_star"] = df.Ce  / (np.sqrt(df.La * df.Pr) + eps)
+    df["Eu_Eu_star"] = df.Eu  / (np.sqrt(df.Sm * df.Gd) + eps)
+    df["Nb_Nb_star"] = df.Nb  / (np.sqrt(df.Zr * df.Yb) + eps)
+    # Trace element ratios
+    for a,b in [("Nb","Zr"),("La","Zr"),("La","Yb"),("Sr","Y"),("Gd","Yb"),
+                ("Dy","Yb"),("Th","Yb"),("Nb","Yb"),("Zr","Y"),("Ti","Zr"),
+                ("Y","Nb"),("Th","Nb"),("Ti","V"),("Ti","Al")]:
+        if a in df and b in df:
+            df[f"{a}_{b}"] = df[a] / (df[b] + eps)
+    # Isotope ε-values
+    if "143Nd_144Nd" in df:
+        CHUR_Nd = 0.512638
+        df["eNd"] = ((df["143Nd_144Nd"] - CHUR_Nd)/CHUR_Nd)*1e4
+    if "176Hf_177Hf" in df:
+        CHUR_Hf = 0.282785
+        df["eHf"] = ((df["176Hf_177Hf"] - CHUR_Hf)/CHUR_Hf)*1e4
+    if "206Pb_204Pb" in df and "207Pb_204Pb" in df:
+        df["Pb_iso_ratio"] = df["206Pb_204Pb"] / df["207Pb_204Pb"]
     return df
 
-def preprocess(parts):
-    full = pd.concat(parts, ignore_index=True)
-    return compute_ratios(filter_si(full))
+def preprocess(sources):
+    """
+    sources: list of (source, name) where source is either
+      - a file-like (uploaded) or
+      - a URL string
+    Returns (df, skipped_names)
+    """
+    parts = []
+    skipped = []
+    for src,name in sources:
+        try:
+            df = pd.read_csv(src, low_memory=False) if isinstance(src,str) else pd.read_csv(src)
+            df = clean_df(df)
+            if "SiO2" not in df.columns:
+                skipped.append(name); continue
+            df = filter_basalt(df)
+            df = compute_ratios(df)
+            if df.empty:
+                skipped.append(name); continue
+            parts.append(df)
+        except Exception:
+            skipped.append(name)
+    if not parts:
+        st.error("❌ No valid GEOROC parts loaded.")
+        st.stop()
+    return pd.concat(parts, ignore_index=True), skipped
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1) INPUT DATA
-# ──────────────────────────────────────────────────────────────────────────────
-st.subheader("1) Input GEOROC Data")
-use_remote = st.checkbox(f"Load all `{PREFIX}*.csv` from GitHub")
-uploads    = st.file_uploader("…or upload your CSV parts", type="csv",
-                              accept_multiple_files=True)
+# -----------------------------
+# Data loading UI
+# -----------------------------
+use_remote = st.checkbox("Load all 2024-12-2JETOA CSV parts from GitHub")
+uploads     = st.file_uploader("…or upload your split GEOROC CSV parts here", type="csv", accept_multiple_files=True)
 
 if use_remote:
-    paths = list_github_csvs(PREFIX)
-    if not paths:
-        st.error("❌ No matching CSVs found on GitHub.")
+    # fetch list of all files in repo root via GitHub API
+    tree_url = "https://api.github.com/repos/holderds/BasaltChem/git/trees/main?recursive=1"
+    try:
+        tree = requests.get(tree_url).json()["tree"]
+        paths = [item["path"] for item in tree
+                 if item["path"].startswith("2024-12-2JETOA_") and item["path"].endswith(".csv")]
+        base = "https://raw.githubusercontent.com/holderds/BasaltChem/main/"
+        sources = [(base+p, p) for p in paths]
+    except Exception:
+        st.error("Failed to fetch file list from GitHub.")
         st.stop()
-    parts, skipped = [], []
-    for p in paths:
-        url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/{p}"
-        try:
-            parts.append(load_and_clean(url))
-        except Exception:
-            skipped.append(p)
-    if not parts:
-        st.error("❌ Could not load any remote parts.")
-        st.stop()
-    st.write(f"✅ Loaded {len(parts)}; skipped {len(skipped)}: {skipped}")
-    df = preprocess(parts)
-
+    df, skipped = preprocess(sources)
+    if skipped:
+        st.warning(f"⚠️ Skipped: {', '.join(skipped)}")
 elif uploads:
-    parts, skipped = [], []
-    for f in uploads:
-        try:
-            parts.append(load_and_clean(f))
-        except Exception:
-            skipped.append(f.name)
-    if not parts:
-        st.error("❌ No valid uploads.")
-        st.stop()
-    st.write(f"✅ Loaded {len(parts)} uploads; skipped {len(skipped)}: {skipped}")
-    df = preprocess(parts)
-
+    sources = [(f, f.name) for f in uploads]
+    df, skipped = preprocess(sources)
+    if skipped:
+        st.warning(f"⚠️ Skipped uploads: {', '.join(skipped)}")
 else:
-    st.info("Please either check **Load from GitHub** or upload CSVs above.")
+    st.info("Please upload CSV(s) or select the GitHub option.")
     st.stop()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2) εNd vs εHf Plot
-# ──────────────────────────────────────────────────────────────────────────────
-if {"εNd","εHf"}.issubset(df.columns):
-    fig,ax=plt.subplots()
-    ax.scatter(df["εNd"], df["εHf"], alpha=0.6)
+# -----------------------------
+# εNd vs εHf Isotope Plot
+# -----------------------------
+if {"eNd","eHf"}.issubset(df.columns):
+    fig, ax = plt.subplots()
+    ax.scatter(df.eNd, df.eHf, alpha=0.6)
     ax.set_xlabel("εNd"); ax.set_ylabel("εHf"); ax.set_title("εNd vs εHf")
     st.pyplot(fig)
-    st.session_state["last_fig"]=fig
+    st.session_state.last_fig = fig
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 3) REE Spider Plot
-# ──────────────────────────────────────────────────────────────────────────────
-if all(e in df.columns for e in REE_LIST):
-    fig2,ax2=plt.subplots()
+# -----------------------------
+# REE Spider Plot
+# -----------------------------
+REEs = ["La","Ce","Pr","Nd","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu"]
+# chondrite normalization factors
+CHONDRITE = dict(La=0.237, Ce=0.613, Pr=0.096, Nd=0.448,
+                 Sm=0.153, Eu=0.061, Gd=0.368, Tb=0.062,
+                 Dy=0.577, Ho=0.096, Er=0.260, Tm=0.038,
+                 Yb=0.314, Lu=0.044)
+
+if all(e in df.columns for e in REEs):
+    fig2, ax2 = plt.subplots()
     for _,r in df.iterrows():
-        norm=[r[e]/CHONDRITE[e] for e in REE_LIST]
-        ax2.plot(REE_LIST,norm,alpha=0.3)
-    ax2.set_yscale("log"); ax2.set_title("REE Spider Plot")
-    st.pyplot(fig2); st.session_state["last_fig"]=fig2
+        normed = [r[e]/CHONDRITE[e] for e in REEs]
+        ax2.plot(REEs, normed, alpha=0.4)
+    ax2.set_yscale("log")
+    ax2.set_ylabel("Normalized to Chondrite"); ax2.set_title("REE Spider Diagram")
+    st.pyplot(fig2)
+    st.session_state.last_fig = fig2
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 4) Ratios Summary
-# ──────────────────────────────────────────────────────────────────────────────
-ratio_cols=[c for c in df.columns if "/" in c or c.startswith("ε")]
+# -----------------------------
+# Ratios summary
+# -----------------------------
+ratio_cols = [c for c in df.columns if "_" in c and c not in ["eNd","eHf"]]
+st.subheader("Computed Ratios Summary")
 if ratio_cols:
-    st.subheader("Computed Ratios & ε-Values")
-    st.dataframe(df[ratio_cols].describe().T.style.format("{:.2f}"))
+    desc = df[ratio_cols].describe().T.round(2)
+    st.dataframe(desc)
 else:
-    st.error("No ratios computed—check your data contain the required elements.")
+    st.warning("No ratios computed—check that your data contain the required elements.")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 5) Export
-# ──────────────────────────────────────────────────────────────────────────────
-if st.button("Download results CSV"):
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("📥 Download", data=csv, file_name="basalt_results.csv")
+# -----------------------------
+# Export & Download
+# -----------------------------
+csv_bytes = df.to_csv(index=False).encode("utf-8")
+st.download_button("📥 Download Combined Data CSV", csv_bytes, "basalt_geochem_results.csv")
 
 if "last_fig" in st.session_state:
-    buf=io.BytesIO()
-    st.session_state["last_fig"].savefig(buf,format="png")
-    st.download_button("📷 Last plot", data=buf.getvalue(),
-                       file_name="last_plot.png", mime="image/png")
+    buf = io.BytesIO()
+    st.session_state.last_fig.savefig(buf, format="png")
+    st.download_button("📷 Download Last Plot as PNG", buf.getvalue(), "plot.png", "image/png")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 6) Supervised Classification
-# ──────────────────────────────────────────────────────────────────────────────
-st.subheader("Supervised Classification (Tectonic Setting)")
-label = st.selectbox("Label column", [c for c in df.columns if df[c].nunique()<20])
-feats = st.multiselect("Features", df.select_dtypes("number").columns.tolist())
+# -----------------------------
+# ML Classification
+# -----------------------------
+st.subheader("ML Classification (Tectonic Setting)")
+label_col = st.selectbox("Select Label Column", [c for c in df.columns if df[c].nunique()<20])
+features  = st.multiselect("Select Features", df.select_dtypes(float).columns.tolist())
 
-if label and feats:
-    dfc = df.dropna(subset=[label]+feats)
-    X = dfc[feats]; y = dfc[label].astype("category").cat.codes
-    Xtr,Xt, ytr,yt = train_test_split(X,y,test_size=0.3,random_state=42)
-    mdl = MLPClassifier((50,25),max_iter=500,random_state=42)
-    mdl.fit(Xtr,ytr); yp = mdl.predict(Xt)
-    st.text("Classification Report"); st.text(classification_report(yt,yp,zero_division=0))
-    df["Predicted"] = None
-    df.loc[dfc.index,"Predicted"] = mdl.predict(dfc[feats])
+if st.button("Run Classification") and label_col and features:
+    # prepare
+    dfc = df.dropna(subset=features+[label_col])
+    X = dfc[features]; y = dfc[label_col].astype("category").cat.codes
+    Xtr,Xte,ytr,yte = train_test_split(X,y,test_size=0.3,random_state=42)
+    model = MLPClassifier((50,25), max_iter=500, random_state=42)
+    model.fit(Xtr,ytr)
+    yp = model.predict(Xte)
+    report = classification_report(yte, yp, output_dict=True, zero_division=0)
+    st.text("Classification report")
+    st.dataframe(pd.DataFrame(report).T.round(2))
