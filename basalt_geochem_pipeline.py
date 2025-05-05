@@ -1,204 +1,216 @@
 # basalt_geochem_pipeline.py
 
-import streamlit as st
+import re
+import io
+import requests
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from io import StringIO
-import requests
+import streamlit as st
 from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import classification_report
 
-st.set_page_config(layout="wide")
+# -----------------------------
+# Helper functions
+# -----------------------------
+
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Strip units from column names, coerce numeric columns, drop empty columns.
+    """
+    # 1) Standardize column names: strip whitespace, remove anything in [brackets]
+    clean_cols = []
+    for col in df.columns:
+        col0 = col.strip()
+        # remove unit annotations like " [wt%]" or " (ppm)"
+        col1 = re.sub(r"\s*\[.*?\]", "", col0)
+        col1 = re.sub(r"\s*\(.*?\)", "", col1)
+        clean_cols.append(col1)
+    df.columns = clean_cols
+
+    # 2) Convert all columns except obviously non-numeric to numeric (coerce errors to NaN)
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # 3) Drop any columns that are now all-NaN
+    df.dropna(axis=1, how="all", inplace=True)
+
+    return df
+
+def load_and_clean_csv(source) -> pd.DataFrame:
+    """
+    Load a CSV (file-like or URL string), clean it, and return DataFrame.
+    """
+    if isinstance(source, str) and source.startswith("http"):
+        text = requests.get(source).text
+        df = pd.read_csv(io.StringIO(text), low_memory=False)
+    else:
+        df = pd.read_csv(source, low_memory=False)
+    return clean_dataframe(df)
+
+def filter_basaltic(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Keep only samples with 45 ≤ SiO2 ≤ 57.
+    """
+    if "SiO2" not in df.columns:
+        st.error("❌ SiO₂ column missing—check your data.")
+        st.stop()
+    return df.loc[(df["SiO2"] >= 45) & (df["SiO2"] <= 57)]
+
+def compute_ratios(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute all trace‐element and REE ratios (but skip isotopes for ML).
+    """
+    eps = 1e-6
+
+    # Major‐trace ratios
+    for num, den in [("Th","La"), ("Ce","Ce*"), ("Nb","Zr"), ("La","Zr"), ("La","Yb"),
+                     ("Sr","Y"), ("Gd","Yb"), ("Nd","Nd*"), ("Dy","Yb"), ("Th","Nb"), ("Nb","Yb")]:
+        if num in df.columns and den in df.columns:
+            if den == "Ce*":
+                # Ce* = sqrt(La*Pr)
+                if "La" in df.columns and "Pr" in df.columns:
+                    df["Ce/Ce*"] = df["Ce"] / (np.sqrt(df["La"] * df["Pr"]) + eps)
+            elif den == "Nd*":
+                if "Pr" in df.columns and "Sm" in df.columns:
+                    df["Nd/Nd*"] = df["Nd"] / (np.sqrt(df["Pr"] * df["Sm"]) + eps)
+            else:
+                df[f"{num}/{den}"] = df[num] / (df[den] + eps)
+
+    # Imobile‐element ratios
+    for a,b in [("Ti","Zr"), ("Y","Nb")]:
+        if a in df.columns and b in df.columns:
+            df[f"{a}/{b}"] = df[a] / (df[b] + eps)
+
+    # Specialized indices if both pieces exist
+    if all(x in df.columns for x in ("La/Yb","Dy/Yb")):
+        df["Crustal_Thickness_Index"] = df["Dy/Yb"]
+        df["Melting_Depth_Index"]        = df["La/Yb"]
+    if "Th/Nb" in df.columns:
+        df["Crustal_Contamination_Index"] = df["Th/Nb"]
+    if "Nb/Y" in df.columns:
+        df["Mantle_Fertility_Index"] = df["Nb/Y"]
+
+    return df
+
+# -----------------------------
+# Streamlit UI & Logic
+# -----------------------------
+
 st.title("Basalt & Basaltic Andesite Geochemistry Interpreter")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1) DATA LOADING / CLEANING
-# ─────────────────────────────────────────────────────────────────────────────
+use_zip       = st.checkbox("Load GEOROC training set from GitHub")
+uploads       = st.file_uploader("Or upload your split GEOROC CSV parts", type="csv",
+                                 accept_multiple_files=True)
+df_list, skipped = [], []
 
-def load_data(csv_like):
-    """Read, rename columns, coerce to numeric."""
-    df = pd.read_csv(csv_like, low_memory=False)
-    rename_map = {
-        'SiO2 [wt%]': 'SiO2', 'TiO2 [wt%]': 'Ti', 'Al2O3 [wt%]': 'Al', 'Fe2O3(t) [wt%]': 'Fe2O3',
-        'MgO [wt%]': 'MgO', 'CaO [wt%]': 'CaO', 'Na2O [wt%]': 'Na2O', 'K2O [wt%]': 'K2O',
-        'P2O5 [wt%]': 'P2O5', 'Th [ppm]': 'Th', 'Nb [ppm]': 'Nb', 'Zr [ppm]': 'Zr',
-        'Y [ppm]': 'Y', 'La [ppm]': 'La', 'Ce [ppm]': 'Ce', 'Pr [ppm]': 'Pr', 'Nd [ppm]': 'Nd',
-        'Sm [ppm]': 'Sm', 'Eu [ppm]': 'Eu', 'Gd [ppm]': 'Gd', 'Tb [ppm]': 'Tb', 'Dy [ppm]': 'Dy',
-        'Ho [ppm]': 'Ho', 'Er [ppm]': 'Er', 'Tm [ppm]': 'Tm', 'Yb [ppm]': 'Yb', 'Lu [ppm]': 'Lu',
-        'V [ppm]': 'V', 'Sc [ppm]': 'Sc', 'Co [ppm]': 'Co', 'Ni [ppm]': 'Ni', 'Cr [ppm]': 'Cr',
-        'Hf [ppm]': 'Hf', 'Sr [ppm]': 'Sr'
-    }
-    df.rename(columns=rename_map, inplace=True)
-    # coerce everything numeric
-    for c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-    return df
-
-@st.cache_data(show_spinner=False)
-def list_github_csvs():
-    """List all CSV files in the root of your repo prefixed with '2024-12-2JETOA'."""
-    api = "https://api.github.com/repos/holderds/BasaltChem/contents"
-    resp = requests.get(api)
-    resp.raise_for_status()
-    files = resp.json()
-    return sorted(
-        f["name"] for f in files
-        if f["type"] == "file" and
-           f["name"].startswith("2024-12-2JETOA") and
-           f["name"].endswith(".csv")
-    )
-
-@st.cache_data(show_spinner=False)
-def load_github_data():
-    parts = list_github_csvs()
-    dfs, skipped = [], []
-    base = "https://raw.githubusercontent.com/holderds/BasaltChem/main/"
-    for name in parts:
+if use_zip:
+    urls = [
+        f"https://raw.githubusercontent.com/holderds/basaltchem/main/example_data/cleaned_georoc_basalt_part{i}.csv"
+        for i in range(1,6)
+    ]
+    for url in urls:
         try:
-            txt = requests.get(base + name).text
-            dfs.append(load_data(StringIO(txt)))
+            df_part = load_and_clean_csv(url)
+            if df_part.empty:
+                skipped.append(url)
+            else:
+                df_list.append(df_part)
         except Exception:
-            skipped.append(name)
-    return dfs, skipped
-
-# UI for data source
-st.write("### Data source")
-use_github = st.checkbox("🔄 Load all JETOA CSVs from GitHub")
-uploaded = st.file_uploader("…or upload your own CSVs", accept_multiple_files=True, type="csv")
-
-if use_github:
-    df_parts, skipped = load_github_data()
-    if skipped:
-        st.warning(f"Skipped {len(skipped)} files: {', '.join(skipped)}")
-elif uploaded:
-    df_parts, skipped = [], []
-    for f in uploaded:
+            skipped.append(url)
+elif uploads:
+    for f in uploads:
         try:
-            df_parts.append(load_data(f))
-        except:
+            df_part = load_and_clean_csv(f)
+            if df_part.empty:
+                skipped.append(f.name)
+            else:
+                df_list.append(df_part)
+        except Exception:
             skipped.append(f.name)
-    if skipped:
-        st.warning(f"Skipped {len(skipped)} uploads: {', '.join(skipped)}")
 else:
-    st.info("Please upload CSVs or select GitHub option.")
+    st.warning("Please either check ‘Load GEOROC…’ or upload CSV files.")
     st.stop()
 
-if not df_parts:
-    st.error("❌ No valid data loaded.")
+if not df_list:
+    st.error("❌ Could not load any valid GEOROC parts.")
     st.stop()
+if skipped:
+    st.warning(f"⚠ Skipped: {', '.join(skipped)}")
 
-df = pd.concat(df_parts, ignore_index=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2) FILTER & RATIOS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def filter_basaltic(df):
-    if "SiO2" not in df.columns:
-        st.error("SiO2 column missing—check your data.")
-        st.stop()
-    return df.loc[(df["SiO2"] >= 45) & (df["SiO2"] <= 57)].reset_index(drop=True)
-
-def compute_ratios(df):
-    eps = 1e-6
-    # anomaly formulas
-    df["Th/La"]   = df["Th"]   / (df["La"]   + eps)
-    df["Ce/Ce*"]  = df["Ce"]   / (np.sqrt(df["La"]*df["Pr"]) + eps)
-    df["Eu/Eu*"]  = df["Eu"]   / (np.sqrt(df["Sm"]*df["Gd"]) + eps)
-    df["Nb/Nb*"]  = df["Nb"]   / (np.sqrt(df["Zr"]*df["Y"])  + eps)
-    # common ratios
-    df["Nb/Zr"]   = df["Nb"]   / (df["Zr"]   + eps)
-    df["La/Yb"]   = df["La"]   / (df["Yb"]   + eps)
-    df["Dy/Yb"]   = df["Dy"]   / (df["Yb"]   + eps)
-    df["Sr/Y"]    = df["Sr"]   / (df["Y"]    + eps)
-    df["Gd/Yb"]   = df["Gd"]   / (df["Yb"]   + eps)
-    df["Nd/Nd*"]  = df["Nd"]   / (np.sqrt(df["Pr"]*df["Sm"]) + eps)
-    # isotopes if present
-    if "143Nd/144Nd" in df: 
-        CHUR_Nd = 0.512638
-        df["εNd"] = ((df["143Nd/144Nd"] - CHUR_Nd) / CHUR_Nd)*1e4
-    if "176Hf/177Hf" in df: 
-        CHUR_Hf = 0.282785
-        df["εHf"] = ((df["176Hf/177Hf"] - CHUR_Hf) / CHUR_Hf)*1e4
-    if {"206Pb/204Pb","207Pb/204Pb"} <= set(df.columns):
-        df["Pb_iso"] = df["206Pb/204Pb"] / df["207Pb/204Pb"]
-    return df
-
+# Concatenate, filter, compute
+df = pd.concat(df_list, ignore_index=True)
 df = filter_basaltic(df)
 df = compute_ratios(df)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3) PLOTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-st.write("## Geochemical Plots")
-
-# εNd vs εHf
-if {"εNd","εHf"} <= set(df.columns):
-    fig,ax=plt.subplots()
-    ax.scatter(df["εNd"], df["εHf"], alpha=0.6)
-    ax.set_xlabel("εNd"); ax.set_ylabel("εHf"); ax.set_title("εNd vs εHf")
+# --- Plots ---
+if {"εNd","εHf"}.issubset(df.columns):
+    fig,ax = plt.subplots()
+    ax.scatter(df["εNd"],df["εHf"],alpha=0.6)
+    ax.set(xlabel="εNd", ylabel="εHf", title="εNd vs εHf")
     st.pyplot(fig)
+    st.session_state["last_fig"] = fig
 
-# REE Spider
-REE = ["La","Ce","Pr","Nd","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu"]
-CHON = {"La":0.248,"Ce":0.612,"Pr":0.098,"Nd":0.445,"Sm":0.153,"Eu":0.056,
-        "Gd":0.199,"Tb":0.027,"Dy":0.156,"Ho":0.035,"Er":0.103,"Tm":0.015,
-        "Yb":0.132,"Lu":0.020}
-if set(REE) <= set(df.columns):
-    fig,ax=plt.subplots()
+# REE spider
+REE = ['La','Ce','Pr','Nd','Sm','Eu','Gd','Tb','Dy','Ho','Er','Tm','Yb','Lu']
+if all(e in df.columns for e in REE):
+    CHONDRITE = {'La':0.237,'Ce':1.5,'Pr':0.4,'Nd':0.5,'Sm':0.2,'Eu':0.1,'Gd':0.2,'Tb':0.05,
+                 'Dy':0.2,'Ho':0.05,'Er':0.1,'Tm':0.02,'Yb':0.1,'Lu':0.02}
+    fig2,ax2 = plt.subplots()
     for _,r in df.iterrows():
-        norm = [r[e]/CHON[e] for e in REE]
-        ax.plot(REE,norm,alpha=0.4)
-    ax.set_yscale("log"); ax.set_title("REE Spider (Normalized)")
-    st.pyplot(fig)
+        normed = [r[e]/CHONDRITE[e] for e in REE]
+        ax2.plot(REE,normed,alpha=0.3)
+    ax2.set(yscale="log", ylabel="Chondrite‐normalized", title="REE Spider Plot")
+    st.pyplot(fig2)
+    st.session_state["last_fig"] = fig2
 
-# Ratios summary
-ratios = [c for c in ["Th/La","Ce/Ce*","Eu/Eu*","Nb/Nb*","Nb/Zr","La/Yb","Dy/Yb","Sr/Y","Gd/Yb","Nd/Nd*"] if c in df]
-if ratios:
-    st.write("### Ratio summary")
-    st.dataframe(df[ratios].describe().T.style.format("{:.2f}"))
-else:
-    st.warning("No ratios computed—check that your data contain the required elements.")
+# Preview computed ratios
+ratio_cols = [c for c in df.columns if "/" in c and c not in ("143Nd/144Nd","176Hf/177Hf",
+                                                               "87Sr/86Sr","206Pb/204Pb","207Pb/204Pb")]
+if ratio_cols:
+    st.subheader("Computed Ratios")
+    st.dataframe(df[ratio_cols].describe().T.style.format("{:.2f}"))
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4) ML CLASSIFICATION
-# ─────────────────────────────────────────────────────────────────────────────
+# --- Classification (excluding isotopes) ---
+st.subheader("MLP Classification (Tectonic Setting)")
+# label choices: any column with few unique values
+labels = [c for c in df.columns if df[c].nunique() < 20]
+label_col = st.selectbox("Label column", labels)
 
-st.write("## Supervised Classification (Tectonic Setting)")
+# features: numeric columns excluding isotope columns
+iso_cols  = ["143Nd/144Nd","176Hf/177Hf","87Sr/86Sr","206Pb/204Pb","207Pb/204Pb",
+             "εNd","εHf","Pb_iso"]
+features = [c for c in df.select_dtypes("number").columns
+            if c not in iso_cols + [label_col]]
 
-# label choices (<20 categories)
-label = st.selectbox("Label column", [c for c in df.columns if df[c].nunique() < 20])
-# all numeric features
-nums  = df.select_dtypes(float).columns.tolist()
-# default to first 10
-feats = st.multiselect("Features", options=nums, default=nums[:10])
-
-if label and feats:
-    cls = df.dropna(subset=feats+[label])
-    if len(cls) < 2:
-        st.error("Not enough data for training.")
+selected = st.multiselect("Features", features, default=features[:10])
+if selected and label_col:
+    sub = df.dropna(subset=selected+[label_col])
+    if len(sub) < 2:
+        st.error("Not enough data for classification after dropping NaNs.")
     else:
-        X = cls[feats]; y = cls[label].astype("category").cat.codes
-        Xtr,Xte,ytr,yte = train_test_split(X,y,test_size=0.3,random_state=42)
-        model = MLPClassifier((50,25),max_iter=500,random_state=42)
-        model.fit(Xtr,ytr)
-        ypr = model.predict(Xte)
-        from sklearn.metrics import classification_report
-        st.text("Classification Report")
-        st.text(classification_report(yte,ypr,zero_division=0))
+        X = sub[selected]
+        y = sub[label_col].astype("category").cat.codes
+        X_train,X_test,y_train,y_test = train_test_split(X,y,test_size=0.3,random_state=42)
+        clf = MLPClassifier((50,25),max_iter=500,random_state=42)
+        clf.fit(X_train,y_train)
+        y_pred = clf.predict(X_test)
+        st.write(classification_report(y_test,y_pred,zero_division=0))
+        # show probability table for first few
+        proba = pd.DataFrame(clf.predict_proba(X_test),
+                             columns=clf.classes_).assign(
+                             True=y_test.map(dict(zip(range(len(clf.classes_)),clf.classes_))),
+                             Pred=clf.classes_[y_pred])
+        st.dataframe(proba.head())
 
-        # show probabilities
-        proba = model.predict_proba(Xte)
-        dfp = pd.DataFrame(proba, columns=model.classes_)
-        st.write("Prediction probabilities:")
-        st.dataframe(dfp.head())
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5) EXPORTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-st.write("## Export")
-csv = df.to_csv(index=False).encode("utf-8")
-st.download_button("📥 Download processed CSV",data=csv,file_name="processed_basalt.csv",mime="text/csv")
+# --- Downloads ---
+if st.button("Download processed data"):
+    btn = st.download_button("📥 CSV", data=df.to_csv(index=False),
+                             file_name="processed_georoc.csv",
+                             mime="text/csv")
+if "last_fig" in st.session_state:
+    buf = io.BytesIO()
+    st.session_state["last_fig"].savefig(buf,format="png")
+    st.download_button("📷 Download last plot", data=buf.getvalue(),
+                       file_name="plot.png", mime="image/png")
