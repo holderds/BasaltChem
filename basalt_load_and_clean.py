@@ -1,70 +1,87 @@
 # basalt_load_and_clean.py
 
-import requests
 import pandas as pd
+import numpy as np
 import streamlit as st
 
-# --- CONFIG ---
-GITHUB_REPO = "holderds/basaltchem"
-BRANCH      = "main"
-PREFIX      = "2024-12-2JETOA_"
+st.set_page_config(page_title="Basalt Load & Clean", layout="wide")
+st.title("Basalt Training Data: Load & Clean")
 
-# --- HELPERS ---
-def list_csv_urls():
-    """Query GitHub API to list our CSVs."""
-    api = f"https://api.github.com/repos/{GITHUB_REPO}/git/trees/{BRANCH}?recursive=1"
-    res = requests.get(api)
-    res.raise_for_status()
-    items = res.json().get("tree", [])
-    return [
-        f"https://raw.githubusercontent.com/{GITHUB_REPO}/{BRANCH}/{i['path']}"
-        for i in items
-        if i["path"].startswith(PREFIX) and i["path"].endswith(".csv")
-    ]
+# 1) List of all CSVs in the repo with prefix "2024-12-2JETOA_"
+BASE_URL = "https://raw.githubusercontent.com/holderds/basaltchem/main/"
+CSV_FILES = [
+    "2024-12-2JETOA_ALKALI_BASALT.csv",
+    "2024-12-2JETOA_BASALTIC-ANDESITE_part1.csv",
+    "2024-12-2JETOA_BASALTIC-ANDESITE_part2.csv",
+    "2024-12-2JETOA_BASALTIC-TRACHYANDESITE.csv",
+    "2024-12-2JETOA_BASALT_part1.csv",
+    "2024-12-2JETOA_BASALT_part2.csv",
+    "2024-12-2JETOA_BASALT_part3.csv",
+    "2024-12-2JETOA_BASALT_part4.csv",
+    "2024-12-2JETOA_BASALT_part5.csv",
+    "2024-12-2JETOA_BASALT_part6.csv",
+    "2024-12-2JETOA_BASALT_part7.csv",
+    "2024-12-2JETOA_BASALT_part8.csv",
+    "2024-12-2JETOA_BASALT_part9.csv",
+    "2024-12-2JETOA_BASANITE.csv",
+    "2024-12-2JETOA_BONINITE.csv",
+    "2024-12-2JETOA_CALC-ALKALI_BASALT.csv",
+    "2024-12-2JETOA_HAWAIITE.csv",
+    "2024-12-2JETOA_MELILITITE.csv",
+    "2024-12-2JETOA_MUGEARITE.csv",
+    "2024-12-2JETOA_PICRITE.csv",
+    "2024-12-2JETOA_SUBALKALI_BASALT.csv",
+    "2024-12-2JETOA_THOLEIITIC_BASALT_part1.csv",
+    "2024-12-2JETOA_THOLEIITIC_BASALT_part2.csv",
+    "2024-12-2JETOA_TRACHYBASALT.csv",
+    "2024-12-2JETOA_TRANSITIONAL_BASALT.csv",
+]
 
-def clean_df(df):
-    """Rename columns, coerce to numeric, drop all-empty columns."""
-    # example rename map — adjust as needed
-    rename_map = {
-        'SiO2 [wt%]': 'SiO2',
-        'TiO2 [wt%]': 'Ti',
-        # …add more if you like
-    }
-    df = df.rename(columns=rename_map)
-    for c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-    return df.dropna(axis=1, how='all')
+# 2) Column rename map
+RENAME_MAP = {
+    'SiO2 [wt%]': 'SiO2', 'TiO2 [wt%]': 'Ti', 'Al2O3 [wt%]': 'Al',
+    'Fe2O3(t) [wt%]': 'Fe2O3', 'MgO [wt%]': 'MgO', 'CaO [wt%]': 'CaO',
+    'Na2O [wt%]': 'Na2O', 'K2O [wt%]': 'K2O', 'P2O5 [wt%]': 'P2O5',
+    'Th [ppm]': 'Th', 'Nb [ppm]': 'Nb', 'Zr [ppm]': 'Zr', 'Y [ppm]': 'Y',
+    'La [ppm]': 'La', 'Ce [ppm]': 'Ce', 'Pr [ppm]': 'Pr', 'Nd [ppm]': 'Nd',
+    'Sm [ppm]': 'Sm', 'Eu [ppm]': 'Eu', 'Gd [ppm]': 'Gd', 'Tb [ppm]': 'Tb',
+    'Dy [ppm]': 'Dy', 'Ho [ppm]': 'Ho', 'Er [ppm]': 'Er', 'Tm [ppm]': 'Tm',
+    'Yb [ppm]': 'Yb', 'Lu [ppm]': 'Lu', 'V [ppm]': 'V', 'Sc [ppm]': 'Sc',
+    'Co [ppm]': 'Co', 'Ni [ppm]': 'Ni', 'Cr [ppm]': 'Cr', 'Hf [ppm]': 'Hf'
+}
 
-# --- APP ---
-st.title("🔄 Load & Clean GEOROC CSVs")
-
-urls = list_csv_urls()
-st.write("Found CSVs:", urls)
-
-if not urls:
-    st.error("❌ No CSV files found.")
-    st.stop()
-
+# 3) Load & clean
 dfs = []
-skipped = []
-for u in urls:
+errors = []
+for fname in CSV_FILES:
+    url = BASE_URL + fname
     try:
-        df = pd.read_csv(u, low_memory=False)
-        dfs.append(clean_df(df))
+        df = pd.read_csv(url, low_memory=False)
+        # rename
+        df = df.rename(columns=RENAME_MAP)
+        # coerce all columns to numeric where possible
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        dfs.append(df)
     except Exception as e:
-        skipped.append(u.split("/")[-1])
+        errors.append(f"{fname}: {e}")
 
-if skipped:
-    st.warning(f"Skipped loading: {', '.join(skipped)}")
+# 4) Report load results
+st.write(f"**Successfully loaded** {len(dfs)} of {len(CSV_FILES)} files.")
+if errors:
+    st.subheader("❌ Load Errors")
+    for err in errors:
+        st.write(f"- {err}")
 
 if not dfs:
-    st.error("❌ None of the CSVs could be loaded!")
     st.stop()
 
-full = pd.concat(dfs, ignore_index=True)
-st.success("✅ All files loaded & cleaned.")
-st.subheader("Preview of concatenated DataFrame")
-st.dataframe(full.head())
+# 5) Concatenate
+df_all = pd.concat(dfs, ignore_index=True)
 
-st.write("DataFrame info:")
-st.text(str(full.info()))
+st.subheader("Combined DataFrame Preview")
+st.write(f"Shape: {df_all.shape}")
+st.dataframe(df_all.head(10))
+
+st.subheader("Column List")
+st.write(df_all.columns.tolist())
